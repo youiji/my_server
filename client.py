@@ -2,113 +2,169 @@ import socket
 
 
 # =========================
-# НАСТРОЙКИ КЛИЕНТА
+# НАСТРОЙКИ ПО УМОЛЧАНИЮ
 # =========================
-
-# Адрес сервера.
-# Для запуска на том же компьютере используется 127.0.0.1 или localhost.
-HOST = '127.0.0.1'
-
-# Порт сервера должен совпадать с тем,
-# который указан в server.py
-PORT = 9090
-
-# Размер порции данных.
-# Чтобы логика была симметричной серверу,
-# тоже используем 1024 байта.
+DEFAULT_HOST = '127.0.0.1'
+DEFAULT_PORT = 9090
 BUFFER_SIZE = 1024
+MAX_PORT = 65535
 
 
-def main():
+def ask_host(default_host: str) -> str:
+    """
+    Безопасно запрашивает у пользователя имя хоста или IP-адрес сервера.
+
+    Если пользователь ничего не ввел, берется значение по умолчанию.
+    """
+    while True:
+        user_input = input(
+            f'Введите адрес сервера [по умолчанию {default_host}]: '
+        ).strip()
+
+        if user_input == '':
+            return default_host
+
+        return user_input
+
+
+def ask_port(default_port: int) -> int:
+    """
+    Безопасно запрашивает номер порта.
+
+    Проверяем, что:
+    - пользователь ввел число;
+    - число в диапазоне 1..65535.
+    """
+    while True:
+        user_input = input(
+            f'Введите порт сервера [по умолчанию {default_port}]: '
+        ).strip()
+
+        if user_input == '':
+            return default_port
+
+        if not user_input.isdigit():
+            print('Ошибка: порт должен быть целым положительным числом.')
+            continue
+
+        port = int(user_input)
+
+        if 1 <= port <= MAX_PORT:
+            return port
+
+        print(f'Ошибка: порт должен быть в диапазоне 1..{MAX_PORT}.')
+
+
+def receive_line_from_server(client_socket: socket.socket) -> str:
+    """
+    Принимает от сервера ровно одну строку, заканчивающуюся символом '\n'.
+
+    Почему это нужно?
+    Потому что TCP - потоковый протокол.
+    У него нет понятия "одно сообщение = один recv()".
+    Поэтому клиент должен сам собирать строку из кусочков,
+    пока не встретит символ конца строки.
+    """
+    text_buffer = ''
+
+    while True:
+        data = client_socket.recv(BUFFER_SIZE)
+
+        if not data:
+            # Если сервер неожиданно закрыл соединение,
+            # возвращаем то, что успели собрать.
+            return text_buffer
+
+        text_buffer += data.decode('utf-8', errors='replace')
+
+        if '\n' in text_buffer:
+            line, _rest = text_buffer.split('\n', 1)
+            return line.rstrip('\r')
+
+
+def main() -> None:
+    """
+    Основная функция клиента.
+
+    Новый вариант клиента работает в цикле:
+    1. подключается к серверу;
+    2. спрашивает у пользователя строки;
+    3. отправляет их серверу;
+    4. получает эхо-ответ;
+    5. завершает работу, когда пользователь вводит "exit".
+
+    ВАЖНО:
+    Мы НЕ закрываем соединение после каждой строки.
+    Соединение живет до тех пор, пока пользователь не введет "exit"
+    или пока сервер не оборвет соединение.
+    """
+    host = ask_host(DEFAULT_HOST)
+    port = ask_port(DEFAULT_PORT)
+
     print('[КЛИЕНТ] Запуск клиента...')
 
-    # Создаем TCP-сокет клиента
+    # Создаем TCP-сокет клиента.
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
-        # Подключаемся к серверу
-        client_socket.connect((HOST, PORT))
+        # Устанавливаем соединение с сервером.
+        client_socket.connect((host, port))
+        print(f'[КЛИЕНТ] Соединение с сервером установлено: {host}:{port}')
 
-        # Служебное сообщение о соединении с сервером
-        print(f'[КЛИЕНТ] Соединение с сервером установлено: {HOST}:{PORT}')
-
-        # Считываем строку у пользователя.
-        # input() читает одну строку со стандартного ввода.
-        message = input('Введите строку для отправки серверу: ')
-
-        # Превращаем строку в байты.
-        # По сети передаются именно байты, а не "обычные строки Python".
-        message_bytes = message.encode('utf-8')
-
-        # Будем отправлять сообщение порциями по 1024 байта.
-        # Это особенно важно, если строка длинная.
-        sent_bytes = 0
-
-        while sent_bytes < len(message_bytes):
-            # Берем очередной кусок сообщения длиной до 1024 байт
-            chunk = message_bytes[sent_bytes:sent_bytes + BUFFER_SIZE]
-
-            # Отправляем этот кусок серверу
-            client_socket.sendall(chunk)
-
-            # Служебное сообщение об отправке данных
-            print(
-                f'[КЛИЕНТ] Отправлено серверу {len(chunk)} байт: '
-                f'{chunk.decode("utf-8")!r}'
-            )
-
-            # Увеличиваем счетчик уже отправленных байтов
-            sent_bytes += len(chunk)
-
-        # Очень важный момент:
-        # мы сообщаем серверу, что больше ничего отправлять не будем.
-        #
-        # Иначе сервер может продолжать ждать новые данные,
-        # а клиент - ждать, когда сервер закроет соединение.
-        # Это частая ошибка у новичков.
-        client_socket.shutdown(socket.SHUT_WR)
-
-        # Теперь принимаем ответ от сервера.
-        # Поскольку сервер - эхо-сервер, он вернет нам ту же строку.
-        received_data = b''
-
+        # Бесконечный цикл общения с сервером.
         while True:
-            data = client_socket.recv(BUFFER_SIZE)
+            message = input('Введите строку (для выхода введите exit): ')
 
-            # Если сервер закрыл соединение и больше данных нет,
-            # recv вернет пустой набор байтов.
-            if not data:
+            # Добавляем символ новой строки.
+            # Это наш простой "протокол": одна логическая строка = один текст + '\n'.
+            message_to_send = message + '\n'
+            message_bytes = message_to_send.encode('utf-8')
+
+            sent_bytes = 0
+            while sent_bytes < len(message_bytes):
+                chunk = message_bytes[sent_bytes:sent_bytes + BUFFER_SIZE]
+                client_socket.sendall(chunk)
+                print(
+                    f'[КЛИЕНТ] Отправлено серверу {len(chunk)} байт: '
+                    f'{chunk.decode("utf-8", errors="replace")!r}'
+                )
+                sent_bytes += len(chunk)
+
+            # Если пользователь ввел exit,
+            # ждем последнее служебное сообщение от сервера и завершаемся.
+            if message == 'exit':
+                final_response = receive_line_from_server(client_socket)
+                if final_response:
+                    print(f'[КЛИЕНТ] Ответ сервера: {final_response!r}')
+                print('[КЛИЕНТ] Получена команда завершения. Закрываем клиент.')
                 break
 
-            # Добавляем полученный кусок к общему ответу
-            received_data += data
+            # Для обычной строки ждем эхо-ответ сервера.
+            response = receive_line_from_server(client_socket)
 
-            # Служебное сообщение о приеме данных
-            print(
-                f'[КЛИЕНТ] Принято от сервера {len(data)} байт: '
-                f'{data.decode("utf-8")!r}'
-            )
+            if response == '':
+                print('[КЛИЕНТ] Сервер закрыл соединение.')
+                break
 
-        # Преобразуем весь полученный ответ обратно в строку
-        echo_message = received_data.decode('utf-8')
-
-        print(f'[КЛИЕНТ] Полный ответ сервера: {echo_message!r}')
+            print(f'[КЛИЕНТ] Получен ответ от сервера: {response!r}')
 
     except ConnectionRefusedError:
-        # Эта ошибка возникает, если сервер не запущен
-        # или указан неверный адрес/порт.
-        print('[КЛИЕНТ] Ошибка: сервер недоступен. '
-              'Проверьте, запущен ли server.py и верны ли HOST/PORT.')
+        print(
+            '[КЛИЕНТ] Ошибка: сервер недоступен. '
+            'Проверьте, запущен ли server.py и верны ли адрес/порт.'
+        )
+
+    except socket.gaierror:
+        print(
+            '[КЛИЕНТ] Ошибка: не удалось распознать имя хоста. '
+            'Проверьте введенный адрес сервера.'
+        )
 
     except Exception as error:
-        # Общий обработчик ошибок
         print(f'[КЛИЕНТ] Ошибка: {error}')
 
     finally:
-        # Закрываем сокет клиента
         client_socket.close()
-
-        # Служебное сообщение о разрыве соединения с сервером
         print('[КЛИЕНТ] Разрыв соединения с сервером.')
 
 
